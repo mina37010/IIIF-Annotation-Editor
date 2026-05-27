@@ -326,7 +326,7 @@ export default function Home() {
               className="border rounded p-2 flex-1"
               value={cutNumber}
               onChange={(e) => setCutNumber(e.target.value)}
-              placeholder="例: A-001"
+              placeholder="内容記述"
             />
 
             <button
