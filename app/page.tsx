@@ -195,7 +195,7 @@ export default function Home() {
   return (
     <main className="min-h-screen p-6 bg-gray-50">
       <h1 className="text-2xl font-bold mb-4">
-        IIIF Storyboard Annotation Editor
+        IIIF Annotation Editor
       </h1>
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
