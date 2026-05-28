@@ -6,7 +6,35 @@ export type Rect = {
 };
 
 export function getCanvasImage(canvas: any): string | null {
-  return canvas?.items?.[0]?.items?.[0]?.body?.id ?? null;
+  const body = canvas?.items?.[0]?.items?.[0]?.body;
+  if (!body) return null;
+
+  const service = Array.isArray(body.service)
+    ? body.service[0]
+    : body.service;
+
+  if (service?.id) {
+    const serviceId = String(service.id).replace(/\/$/, "");
+    const type = service.type ?? service["@type"] ?? "";
+
+    if (String(type).includes("ImageService2")) {
+      return `${serviceId}/full/1200,/0/default.jpg`;
+    }
+
+    return `${serviceId}/full/1200,/0/default.jpg`;
+  }
+
+  if (body.id) { 
+    const id = String(body.id);
+
+    if (id.includes("/image/iiif/") && !id.includes("/full/")) {
+      return `${id.replace(/\/$/, "")}/full/1200,/0/default.jpg`;
+    }
+
+    return id;
+  }
+
+  return null;
 }
 
 export function parseXywh(target: string): Rect | null {

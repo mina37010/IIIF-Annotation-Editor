@@ -34,6 +34,14 @@ export default function Home() {
     return selectedCanvas?.annotations?.flatMap((p: any) => p.items ?? []) ?? [];
   }, [selectedCanvas]);
 
+  const [imageLoading, setImageLoading] = useState(false);
+
+  useEffect(() => {
+    if (imageUrl) {
+      setImageLoading(true);
+    }
+  }, [imageUrl]);
+
   function resetEditingState() {
     setRect(null);
     setDragStart(null);
@@ -345,10 +353,17 @@ export default function Home() {
               onMouseMove={onMouseMove}
               onMouseUp={onMouseUp}
             >
+              {imageLoading && (
+                <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 text-sm font-bold">
+                  読み込み中
+                </div>
+              )}
               <img
                 src={imageUrl}
                 alt=""
                 className="w-full block pointer-events-none"
+                onLoad={() => setImageLoading(false)}
+                onError={() => setImageLoading(false)}
               />
 
               {existingAnnotations.map((anno: any) => {
