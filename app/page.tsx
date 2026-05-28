@@ -355,7 +355,7 @@ export default function Home() {
             >
               {imageLoading && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 text-sm font-bold">
-                  読み込み中...
+                  読み込み中
                 </div>
               )}
               <img
