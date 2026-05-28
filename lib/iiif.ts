@@ -24,7 +24,7 @@ export function getCanvasImage(canvas: any): string | null {
     return `${serviceId}/full/1200,/0/default.jpg`;
   }
 
-  if (body.id) {
+  if (body.id) { 
     const id = String(body.id);
 
     if (id.includes("/image/iiif/") && !id.includes("/full/")) {
