@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addAnnotationToCanvas,
   deleteAnnotation,
@@ -10,18 +10,57 @@ import {
   updateAnnotation,
 } from "@/lib/iiif";
 
+type ViewerMode = "pan" | "draw";
+
+type ViewTransform = {
+  x: number;
+  y: number;
+  scale: number;
+};
+
+type PointerPosition = {
+  clientX: number;
+  clientY: number;
+};
+
 export default function Home() {
+  const [manifestUrl, setManifestUrl] = useState("");
   const [manifestText, setManifestText] = useState("");
   const [manifest, setManifest] = useState<any | null>(null);
   const [selectedCanvasIndex, setSelectedCanvasIndex] = useState(0);
   const [cutNumber, setCutNumber] = useState("");
   const [rect, setRect] = useState<Rect | null>(null);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(
-    null
-  );
   const [editingAnnotationId, setEditingAnnotationId] = useState<string | null>(
     null
   );
+  const [viewerMode, setViewerMode] = useState<ViewerMode>("pan");
+  const [view, setView] = useState<ViewTransform>({ x: 0, y: 0, scale: 1 });
+  const [dragAction, setDragAction] = useState<
+    | {
+        type: "pan";
+        pointerId: number;
+        startClientX: number;
+        startClientY: number;
+        startView: ViewTransform;
+      }
+    | {
+        type: "draw";
+        pointerId: number;
+        startPoint: { x: number; y: number };
+      }
+    | {
+        type: "pinch";
+        pointerIds: [number, number];
+        startDistance: number;
+        startImageX: number;
+        startImageY: number;
+        startView: ViewTransform;
+      }
+    | null
+  >(null);
+  const [manifestUrlLoading, setManifestUrlLoading] = useState(false);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const activePointersRef = useRef<Map<number, PointerPosition>>(new Map());
 
   const canvases = useMemo(() => {
     return Array.isArray(manifest?.items) ? manifest.items : [];
@@ -44,30 +83,148 @@ export default function Home() {
 
   function resetEditingState() {
     setRect(null);
-    setDragStart(null);
     setEditingAnnotationId(null);
     setCutNumber("");
+    setDragAction(null);
+    activePointersRef.current.clear();
   }
+
+  function applyManifest(parsed: any) {
+    if (parsed.type !== "Manifest") {
+      alert("type が Manifest ではありません。");
+      return false;
+    }
+
+    if (!Array.isArray(parsed.items)) {
+      alert("manifest.items が配列ではありません。IIIF Manifestを確認してください。");
+      return false;
+    }
+
+    setManifest(parsed);
+    setManifestText(JSON.stringify(parsed, null, 2));
+    setSelectedCanvasIndex(0);
+    resetEditingState();
+    return true;
+  }
+
+  function getFitView(): ViewTransform | null {
+    if (!selectedCanvas || !viewportRef.current) return null;
+
+    const bounds = viewportRef.current.getBoundingClientRect();
+    if (bounds.width === 0 || bounds.height === 0) return null;
+
+    const scale = Math.min(
+      bounds.width / selectedCanvas.width,
+      bounds.height / selectedCanvas.height
+    );
+
+    return {
+      x: (bounds.width - selectedCanvas.width * scale) / 2,
+      y: (bounds.height - selectedCanvas.height * scale) / 2,
+      scale,
+    };
+  }
+
+  function resetView() {
+    const fitView = getFitView();
+    if (fitView) setView(fitView);
+  }
+
+  function clampView(next: ViewTransform): ViewTransform {
+    if (!selectedCanvas || !viewportRef.current) return next;
+
+    const bounds = viewportRef.current.getBoundingClientRect();
+    const imageWidth = selectedCanvas.width * next.scale;
+    const imageHeight = selectedCanvas.height * next.scale;
+
+    return {
+      ...next,
+      x:
+        imageWidth <= bounds.width
+          ? (bounds.width - imageWidth) / 2
+          : Math.min(0, Math.max(bounds.width - imageWidth, next.x)),
+      y:
+        imageHeight <= bounds.height
+          ? (bounds.height - imageHeight) / 2
+          : Math.min(0, Math.max(bounds.height - imageHeight, next.y)),
+    };
+  }
+
+  function getScaleBounds() {
+    const fitView = getFitView();
+
+    return {
+      minScale: (fitView?.scale ?? 0.1) * 0.5,
+      maxScale: (fitView?.scale ?? 1) * 24,
+    };
+  }
+
+  function getPointerDistance(
+    first: PointerPosition,
+    second: PointerPosition
+  ) {
+    return Math.hypot(
+      second.clientX - first.clientX,
+      second.clientY - first.clientY
+    );
+  }
+
+  function getPointerCenter(first: PointerPosition, second: PointerPosition) {
+    return {
+      clientX: (first.clientX + second.clientX) / 2,
+      clientY: (first.clientY + second.clientY) / 2,
+    };
+  }
+
+  useEffect(() => {
+    if (!imageUrl || !selectedCanvas) return;
+
+    const id = window.requestAnimationFrame(resetView);
+    return () => window.cancelAnimationFrame(id);
+  }, [imageUrl, selectedCanvas]);
+
+  useEffect(() => {
+    function onResize() {
+      resetView();
+    }
+
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [selectedCanvas]);
 
   function loadManifest() {
     try {
       const parsed = JSON.parse(manifestText);
-
-      if (parsed.type !== "Manifest") {
-        alert("type が Manifest ではありません。");
-        return;
-      }
-
-      if (!Array.isArray(parsed.items)) {
-        alert("manifest.items が配列ではありません。IIIF Manifestを確認してください。");
-        return;
-      }
-
-      setManifest(parsed);
-      setSelectedCanvasIndex(0);
-      resetEditingState();
+      applyManifest(parsed);
     } catch {
       alert("manifest.json のJSON形式が不正です。");
+    }
+  }
+
+  async function loadManifestFromUrl() {
+    const url = manifestUrl.trim();
+    if (!url) {
+      alert("manifest URLを入力してください。");
+      return;
+    }
+
+    setManifestUrlLoading(true);
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        alert(`manifest URLの読み込みに失敗しました。HTTP ${response.status}`);
+        return;
+      }
+
+      const parsed = await response.json();
+      applyManifest(parsed);
+    } catch {
+      alert(
+        "manifest URLの読み込みに失敗しました。URLまたはCORS設定を確認してください。"
+      );
+    } finally {
+      setManifestUrlLoading(false);
     }
   }
 
@@ -104,50 +261,211 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [canvases.length]);
 
-  function getImagePoint(e: React.MouseEvent<HTMLDivElement>) {
+  function getImagePoint(e: React.PointerEvent<HTMLDivElement>) {
     if (!selectedCanvas) return null;
 
-    const el = e.currentTarget;
-    const bounds = el.getBoundingClientRect();
-
-    const displayX = e.clientX - bounds.left;
-    const displayY = e.clientY - bounds.top;
-
-    const scaleX = selectedCanvas.width / bounds.width;
-    const scaleY = selectedCanvas.height / bounds.height;
+    const bounds = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - bounds.left - view.x) / view.scale;
+    const y = (e.clientY - bounds.top - view.y) / view.scale;
 
     return {
-      x: displayX * scaleX,
-      y: displayY * scaleY,
+      x: Math.min(selectedCanvas.width, Math.max(0, x)),
+      y: Math.min(selectedCanvas.height, Math.max(0, y)),
     };
   }
 
-  function onMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+  function onWheel(e: React.WheelEvent<HTMLDivElement>) {
     if (!selectedCanvas) return;
+    e.preventDefault();
+
+    if (viewerMode === "draw") {
+      return;
+    }
+
+    const { minScale, maxScale } = getScaleBounds();
+    const zoomFactor = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+    const nextScale = Math.min(
+      maxScale,
+      Math.max(minScale, view.scale * zoomFactor)
+    );
+    const bounds = e.currentTarget.getBoundingClientRect();
+    const pointerX = e.clientX - bounds.left;
+    const pointerY = e.clientY - bounds.top;
+    const imageX = (pointerX - view.x) / view.scale;
+    const imageY = (pointerY - view.y) / view.scale;
+
+    setView(
+      clampView({
+        scale: nextScale,
+        x: pointerX - imageX * nextScale,
+        y: pointerY - imageY * nextScale,
+      })
+    );
+  }
+
+  function zoomBy(multiplier: number) {
+    if (!selectedCanvas || !viewportRef.current) return;
+
+    const bounds = viewportRef.current.getBoundingClientRect();
+    const { minScale, maxScale } = getScaleBounds();
+    const nextScale = Math.min(
+      maxScale,
+      Math.max(minScale, view.scale * multiplier)
+    );
+    const pointerX = bounds.width / 2;
+    const pointerY = bounds.height / 2;
+    const imageX = (pointerX - view.x) / view.scale;
+    const imageY = (pointerY - view.y) / view.scale;
+
+    setView(
+      clampView({
+        scale: nextScale,
+        x: pointerX - imageX * nextScale,
+        y: pointerY - imageY * nextScale,
+      })
+    );
+  }
+
+  function getZoomPercent() {
+    const fitView = getFitView();
+    if (!fitView) return 100;
+    return Math.round((view.scale / fitView.scale) * 100);
+  }
+
+  function onPointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (!selectedCanvas) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    activePointersRef.current.set(e.pointerId, {
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
+
+    if (viewerMode === "pan") {
+      const pointers = Array.from(activePointersRef.current.entries());
+      if (e.pointerType === "touch" && pointers.length >= 2) {
+        const [first, second] = pointers.slice(-2);
+        const startCenter = getPointerCenter(first[1], second[1]);
+        const bounds = e.currentTarget.getBoundingClientRect();
+
+        setDragAction({
+          type: "pinch",
+          pointerIds: [first[0], second[0]],
+          startDistance: getPointerDistance(first[1], second[1]),
+          startImageX: (startCenter.clientX - bounds.left - view.x) / view.scale,
+          startImageY: (startCenter.clientY - bounds.top - view.y) / view.scale,
+          startView: view,
+        });
+        return;
+      }
+
+      setDragAction({
+        type: "pan",
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startView: view,
+      });
+      return;
+    }
+
+    if (e.pointerType === "touch" && activePointersRef.current.size > 1) {
+      setDragAction(null);
+      setRect(null);
+      return;
+    }
 
     const p = getImagePoint(e);
     if (!p) return;
 
-    setDragStart(p);
+    setDragAction({ type: "draw", pointerId: e.pointerId, startPoint: p });
     setRect({ x: p.x, y: p.y, width: 0, height: 0 });
   }
 
-  function onMouseMove(e: React.MouseEvent<HTMLDivElement>) {
-    if (!dragStart || !selectedCanvas) return;
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    activePointersRef.current.set(e.pointerId, {
+      clientX: e.clientX,
+      clientY: e.clientY,
+    });
+
+    if (!dragAction || !selectedCanvas) return;
+
+    if (dragAction.type === "pinch") {
+      const first = activePointersRef.current.get(dragAction.pointerIds[0]);
+      const second = activePointersRef.current.get(dragAction.pointerIds[1]);
+      if (!first || !second || !viewportRef.current) return;
+
+      const distance = getPointerDistance(first, second);
+      if (dragAction.startDistance === 0) return;
+
+      const center = getPointerCenter(first, second);
+      const bounds = viewportRef.current.getBoundingClientRect();
+      const { minScale, maxScale } = getScaleBounds();
+      const nextScale = Math.min(
+        maxScale,
+        Math.max(
+          minScale,
+          dragAction.startView.scale * (distance / dragAction.startDistance)
+        )
+      );
+      const viewportX = center.clientX - bounds.left;
+      const viewportY = center.clientY - bounds.top;
+
+      setView(
+        clampView({
+          scale: nextScale,
+          x: viewportX - dragAction.startImageX * nextScale,
+          y: viewportY - dragAction.startImageY * nextScale,
+        })
+      );
+      return;
+    }
+
+    if (dragAction.pointerId !== e.pointerId) return;
+
+    if (dragAction.type === "pan") {
+      const dx = e.clientX - dragAction.startClientX;
+      const dy = e.clientY - dragAction.startClientY;
+      setView(
+        clampView({
+          ...dragAction.startView,
+          x: dragAction.startView.x + dx,
+          y: dragAction.startView.y + dy,
+        })
+      );
+      return;
+    }
 
     const p = getImagePoint(e);
     if (!p) return;
 
     setRect({
-      x: Math.min(dragStart.x, p.x),
-      y: Math.min(dragStart.y, p.y),
-      width: Math.abs(p.x - dragStart.x),
-      height: Math.abs(p.y - dragStart.y),
+      x: Math.min(dragAction.startPoint.x, p.x),
+      y: Math.min(dragAction.startPoint.y, p.y),
+      width: Math.abs(p.x - dragAction.startPoint.x),
+      height: Math.abs(p.y - dragAction.startPoint.y),
     });
   }
 
-  function onMouseUp() {
-    setDragStart(null);
+  function onPointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    activePointersRef.current.delete(e.pointerId);
+
+    if (
+      (dragAction?.type === "pan" || dragAction?.type === "draw") &&
+      dragAction.pointerId === e.pointerId
+    ) {
+      setDragAction(null);
+    }
+
+    if (
+      dragAction?.type === "pinch" &&
+      dragAction.pointerIds.includes(e.pointerId)
+    ) {
+      setDragAction(null);
+    }
+  }
+
+  function onPointerCancel(e: React.PointerEvent<HTMLDivElement>) {
+    onPointerUp(e);
   }
 
   function saveAnnotation() {
@@ -210,6 +528,30 @@ export default function Home() {
         <div className="bg-white border rounded p-4">
           <h2 className="font-bold mb-2">1. Manifest JSON</h2>
 
+          <form
+            className="flex gap-2 mb-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              loadManifestFromUrl();
+            }}
+          >
+            <input
+              className="border rounded p-2 flex-1"
+              value={manifestUrl}
+              onChange={(e) => setManifestUrl(e.target.value)}
+              placeholder="manifest URL"
+              type="url"
+            />
+
+            <button
+              className="px-4 py-2 bg-black text-white rounded disabled:opacity-40"
+              disabled={manifestUrlLoading}
+              type="submit"
+            >
+              URL読込
+            </button>
+          </form>
+
           <textarea
             className="w-full h-80 border rounded p-2 font-mono text-sm"
             value={manifestText}
@@ -267,6 +609,7 @@ export default function Home() {
                           setEditingAnnotationId(anno.id);
                           setCutNumber(String(label));
                           setRect(r);
+                          setViewerMode("draw");
                         }}
                       >
                         修正
@@ -346,62 +689,134 @@ export default function Home() {
             </button>
           </div>
 
+          {imageUrl && selectedCanvas && (
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <div className="inline-flex overflow-hidden border rounded">
+                <button
+                  className={`px-3 py-2 text-sm ${
+                    viewerMode === "pan" ? "bg-black text-white" : "bg-white"
+                  }`}
+                  onClick={() => setViewerMode("pan")}
+                >
+                  移動
+                </button>
+                <button
+                  className={`px-3 py-2 text-sm border-l ${
+                    viewerMode === "draw" ? "bg-black text-white" : "bg-white"
+                  }`}
+                  onClick={() => setViewerMode("draw")}
+                >
+                  矩形
+                </button>
+              </div>
+
+              <div className="inline-flex items-center overflow-hidden border rounded">
+                <button
+                  className="px-3 py-2 text-sm"
+                  onClick={() => zoomBy(1 / 1.25)}
+                >
+                  -
+                </button>
+                <div className="min-w-16 px-3 py-2 text-sm text-center border-x">
+                  {getZoomPercent()}%
+                </div>
+                <button
+                  className="px-3 py-2 text-sm"
+                  onClick={() => zoomBy(1.25)}
+                >
+                  +
+                </button>
+              </div>
+
+              <button
+                className="px-3 py-2 text-sm border rounded"
+                onClick={resetView}
+              >
+                全体表示
+              </button>
+            </div>
+          )}
+
           {imageUrl && selectedCanvas ? (
             <div
-              className="relative border bg-gray-100 select-none"
-              onMouseDown={onMouseDown}
-              onMouseMove={onMouseMove}
-              onMouseUp={onMouseUp}
+              ref={viewportRef}
+              className={`relative h-[70vh] min-h-96 overflow-hidden border bg-gray-100 select-none touch-none ${
+                viewerMode === "pan"
+                  ? "cursor-grab active:cursor-grabbing"
+                  : "cursor-crosshair"
+              }`}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerCancel}
+              onWheel={onWheel}
             >
               {imageLoading && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 text-sm font-bold">
                   読み込み中
                 </div>
               )}
-              <img
-                src={imageUrl}
-                alt=""
-                className="w-full block pointer-events-none"
-                onLoad={() => setImageLoading(false)}
-                onError={() => setImageLoading(false)}
-              />
-
-              {existingAnnotations.map((anno: any) => {
-                const r = parseXywh(String(anno.target));
-                if (!r) return null;
-
-                const label =
-                  anno.body?.value ??
-                  anno.body?.cutNumber ??
-                  anno.body?.source?.id ??
-                  "";
-
-                return (
-                  <div
-                    key={anno.id}
-                    className="absolute border-2 border-blue-600 bg-blue-500/20"
-                    style={{
-                      left: `${(r.x / selectedCanvas.width) * 100}%`,
-                      top: `${(r.y / selectedCanvas.height) * 100}%`,
-                      width: `${(r.width / selectedCanvas.width) * 100}%`,
-                      height: `${(r.height / selectedCanvas.height) * 100}%`,
-                    }}
-                    title={String(label)}
-                  />
-                );
-              })}
-
-              {rect && (
-                <div
-                  className="absolute border-2 border-red-600 bg-red-500/20"
+              <div
+                className="absolute top-0 left-0"
+                style={{
+                  width: selectedCanvas.width,
+                  height: selectedCanvas.height,
+                  transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
+                  transformOrigin: "0 0",
+                }}
+              >
+                <img
+                  src={imageUrl}
+                  alt=""
+                  className="block max-w-none pointer-events-none"
                   style={{
-                    left: `${(rect.x / selectedCanvas.width) * 100}%`,
-                    top: `${(rect.y / selectedCanvas.height) * 100}%`,
-                    width: `${(rect.width / selectedCanvas.width) * 100}%`,
-                    height: `${(rect.height / selectedCanvas.height) * 100}%`,
+                    width: selectedCanvas.width,
+                    height: selectedCanvas.height,
                   }}
+                  onLoad={() => {
+                    setImageLoading(false);
+                    resetView();
+                  }}
+                  onError={() => setImageLoading(false)}
                 />
-              )}
+
+                {existingAnnotations.map((anno: any) => {
+                  const r = parseXywh(String(anno.target));
+                  if (!r) return null;
+
+                  const label =
+                    anno.body?.value ??
+                    anno.body?.cutNumber ??
+                    anno.body?.source?.id ??
+                    "";
+
+                  return (
+                    <div
+                      key={anno.id}
+                      className="absolute border-2 border-blue-600 bg-blue-500/20"
+                      style={{
+                        left: r.x,
+                        top: r.y,
+                        width: r.width,
+                        height: r.height,
+                      }}
+                      title={String(label)}
+                    />
+                  );
+                })}
+
+                {rect && (
+                  <div
+                    className="absolute border-2 border-red-600 bg-red-500/20"
+                    style={{
+                      left: rect.x,
+                      top: rect.y,
+                      width: rect.width,
+                      height: rect.height,
+                    }}
+                  />
+                )}
+              </div>
             </div>
           ) : (
             <p className="text-sm text-gray-500">
